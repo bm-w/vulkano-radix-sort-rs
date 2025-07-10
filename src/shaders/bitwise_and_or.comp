@@ -1,0 +1,72 @@
+#version 460
+
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+
+
+layout(constant_id = 0) const uint WORK_GROUP_SIZE = 1024;
+layout(constant_id = 1) const uint SUBGROUP_SIZE = 32;
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer AndVals {
+	uint and_vals[];
+};
+
+layout(set = 0, binding = 1, std430) readonly buffer OrVals {
+	uint or_vals[];
+};
+
+layout(set = 0, binding = 2, std430) writeonly buffer WgAnd {
+	uint wg_and[];
+};
+
+layout(set = 0, binding = 3, std430) writeonly buffer WgOr {
+	uint wg_or[];
+};
+
+// Geometric series: `w/s + w/s/s + w/s/s/s + …`, which approx. evaluates
+// to `w/(s-1)` (tested for a wide range for values for `w` and `s`).
+const uint SG_REDUCE_SIZE = WORK_GROUP_SIZE / (SUBGROUP_SIZE - 1);
+shared uint sg_and[SG_REDUCE_SIZE];
+shared uint sg_or[SG_REDUCE_SIZE];
+
+void main() {
+	bool in_bounds = gl_GlobalInvocationID.x < and_vals.length();
+
+	// Neutral values for out-of-bounds threads
+	uint and_val = in_bounds ? and_vals[gl_GlobalInvocationID.x] : 0xFFFFFFFF;
+	uint or_val = in_bounds ? or_vals[gl_GlobalInvocationID.x] : 0x00000000;
+	and_val = subgroupAnd(and_val);
+	or_val = subgroupOr(or_val);
+
+	if (subgroupElect()) {
+		sg_and[gl_SubgroupID] = and_val;
+		sg_or[gl_SubgroupID] = or_val;
+	}
+
+	for (uint s = 1, o = 0; gl_NumSubgroups > s;) {
+		barrier();
+
+		uint n = (gl_NumSubgroups - 1) / s + 1;
+		uint ss = s * gl_SubgroupSize;
+		uint oo = o + n;
+		if (gl_LocalInvocationID.x < n) {
+			and_val = sg_and[o + gl_LocalInvocationID.x];
+			or_val = sg_or[o + gl_LocalInvocationID.x];
+			and_val = subgroupAnd(and_val);
+			or_val = subgroupOr(or_val);
+
+			if (gl_NumSubgroups > ss && subgroupElect()) {
+				sg_and[oo + gl_SubgroupID] = and_val;
+				sg_or[oo + gl_SubgroupID] = or_val;
+			}
+		}
+		s = ss, o = oo;
+	}
+
+	if (gl_LocalInvocationID.x == 0) {
+		wg_and[gl_WorkGroupID.x] = and_val;
+		wg_or[gl_WorkGroupID.x] = or_val;
+	}
+}

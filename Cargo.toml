@@ -2,3 +2,9 @@
 name = "vulkan-radix-sort"
 version = "0.0.0"
 edition = "2024"
+
+[dependencies]
+foldhash = "0.1.5"
+thiserror = "2.0.12"
+vulkano = "0.35.1"
+vulkano-shaders = "0.35.0"
