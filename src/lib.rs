@@ -1,4 +1,5 @@
 pub mod bitwise_and_or;
+pub mod prefix_sums;
 mod util;
 
 #[cfg(test)]

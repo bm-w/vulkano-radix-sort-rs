@@ -1,0 +1,68 @@
+#version 460
+
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+
+
+layout(constant_id = 0) const uint WORK_GROUP_SIZE = 1024;
+layout(constant_id = 1) const uint SUBGROUP_SIZE = 32;
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) buffer Vals {
+	uint vals[];
+};
+
+layout(set = 0, binding = 1, std430) writeonly buffer WgSums {
+	uint wg_sums[];
+};
+
+// Geometric series: `w/s + w/s/s + w/s/s/s + …`, which approx. evaluates
+// to `w/(s-1)` (tested for a wide range for values for `w` and `s`).
+const uint SG_REDUCE_SIZE = WORK_GROUP_SIZE / (SUBGROUP_SIZE - 1);
+shared uint sg_sums[SG_REDUCE_SIZE];
+
+void main() {
+	bool in_bounds = gl_GlobalInvocationID.x < vals.length();
+
+	uint val = in_bounds ? vals[gl_GlobalInvocationID.x] : 0;
+	uint prefix_sum = subgroupExclusiveAdd(val);
+	uint sum = subgroupAdd(val);
+
+	if (gl_NumSubgroups > 1) {
+		if (subgroupElect()) {
+			sg_sums[gl_SubgroupID] = sum;
+		}
+		barrier();
+	} 
+
+	for (uint s = 1, o = 0; gl_NumSubgroups > s;) {
+		uint n = (gl_NumSubgroups - 1) / s + 1;
+		uint ss = s * gl_SubgroupSize;
+		uint oo = o + n;
+		if (gl_LocalInvocationID.x < n) {
+			uint idx = o + gl_LocalInvocationID.x;
+			sum = sg_sums[idx];
+
+			uint prefix_sum = subgroupExclusiveAdd(sum);
+			sg_sums[idx] = prefix_sum;
+
+			sum = subgroupAdd(sum);
+			if (gl_NumSubgroups > ss && subgroupElect()) {
+				sg_sums[oo + gl_SubgroupID] = sum;
+			}
+		}
+		barrier();
+
+		prefix_sum += sg_sums[o + gl_SubgroupID / s];
+
+		s = ss, o = oo;
+	}
+
+	if (gl_GlobalInvocationID.x < vals.length()) {
+		vals[gl_GlobalInvocationID.x] = prefix_sum;
+	}
+	if (gl_LocalInvocationID.x == 0 && gl_NumWorkGroups.x > 1) {
+		wg_sums[gl_WorkGroupID.x] = sum;
+	}
+}
