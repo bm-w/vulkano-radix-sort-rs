@@ -15,6 +15,8 @@ mod vk {
 }
 use vulkano::{device::DeviceOwned as _, pipeline::Pipeline as _};
 
+use crate::util::ParallelReduceExt;
+
 /// A compute kernel that performs bitwise AND/OR operations on an array of
 /// 32-bit unsigned integers.
 pub struct BitwiseAndOr {
@@ -95,25 +97,10 @@ impl BitwiseAndOr {
 		})
 	}
 
-	fn partial_results_buffers_len(&self, vals_buffer_len: u64) -> u64 {
-		(vals_buffer_len - 1) / self.work_group_size as u64 + 1
-	}
-
-	fn result_buffers_split(&self, num_work_groups: u64) -> u64 {
-		// Ensuring the split is 16-byte aligned
-		((num_work_groups - 1) / 4 + 1) * 4
-	}
-
 	/// Returns the required length of each of this kernel’s results buffers
 	/// for the given input values length.
-	pub fn results_buffer_len(&self, mut vals_len: u64) -> u64 {
-		let mut min_result_buffers_len = 0;
-		while vals_len > 1 {
-			let result_buffers_len = self.partial_results_buffers_len(vals_len);
-			min_result_buffers_len += self.result_buffers_split(result_buffers_len);
-			vals_len = result_buffers_len;
-		}
-		min_result_buffers_len.saturating_sub(3)
+	pub fn results_buffer_len(&self, vals_len: u64) -> u64 {
+		self.parallel_reduce_buffer_len(vals_len)
 	}
 
 	/// Records the bitwise-AND/OR kernel(s) onto the given command buffer
@@ -189,14 +176,14 @@ impl BitwiseAndOr {
 			)
 			.unwrap();
 
-		let num_work_groups = self.partial_results_buffers_len(and_vals_buffer.len());
+		let num_work_groups = self.partial_parallel_reduce_buffer_len(and_vals_buffer.len());
 		unsafe { command_buffer_builder.dispatch([num_work_groups as u32, 1, 1]) }.unwrap();
 
 		if num_work_groups == 1 {
 			return Ok(0);
 		}
 
-		let split = self.result_buffers_split(num_work_groups);
+		let split = self.parallel_reduce_buffer_split(num_work_groups);
 		let (and_vals_buffer, and_results_buffer) = and_results_buffer.split_at(split);
 		let (or_vals_buffer, or_results_buffer) = or_results_buffer.split_at(split);
 
@@ -209,6 +196,23 @@ impl BitwiseAndOr {
 				or_results_buffer,
 				work_group_size,
 			)?)
+	}
+}
+
+impl ParallelReduceExt for BitwiseAndOr {
+	const WORK_GROUP_STRIDE: u64 = 4;
+
+	fn work_group_size(&self) -> u64 {
+		self.work_group_size as u64
+	}
+
+	fn buffer_offset_alignment(&self) -> u64 {
+		self.pipeline
+			.device()
+			.physical_device()
+			.properties()
+			.min_storage_buffer_offset_alignment
+			.as_devicesize()
 	}
 }
 
