@@ -1,0 +1,102 @@
+#version 460
+
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+
+
+layout(constant_id = 0) const uint WORK_GROUP_SIZE = 1024;
+layout(constant_id = 1) const uint SUBGROUP_SIZE = 32;
+layout(constant_id = 2) const uint R_WAY = 4;
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+#include "radix_sort_shared.comp"
+
+layout(set = 0, binding = 4) restrict readonly buffer WgPrefixSums {
+	uint wg_prefix_sums[];
+};
+
+// Geometric series: `w/s + w/s/s + w/s/s/s + …`, which approx. evaluates
+// to `w/(s-1)` (tested for a wide range for values for `w` and `s`).
+const uint SG_REDUCE_SIZE = R_WAY * (WORK_GROUP_SIZE / (SUBGROUP_SIZE - 1));
+shared uint sg_prefix_sums[SG_REDUCE_SIZE];
+
+layout(push_constant) uniform PushConstants {
+	uint radix_offset;
+	uint val_size;
+} uniforms;
+
+void main() {
+	bool in_bounds = gl_GlobalInvocationID.x < keys_in.length();
+	bool vals_is_keys = uniforms.val_size == 0;
+
+	uint radix_shift = uniforms.radix_offset * findLSB(R_WAY);
+	uint radix_mask = (R_WAY - 1) << radix_shift;
+
+	uint key = in_bounds ? keys_in[gl_GlobalInvocationID.x] : 0xFFFFFFFFu;
+	uint shifted_radix_key = (key & radix_mask) >> radix_shift;
+
+	// Count the number of preceding keys with the same radix key as `key`
+	// within the subgroup using a prefix sum over the same-or-not boolean (1
+	// or 0), and store the prefix sums in `sg_prefix_sums` for subsequent
+	// reduction
+	uint dest_gid = 0;
+	for (uint srk = 0; srk < R_WAY; srk++) {
+		bool is_radix_key = shifted_radix_key == srk;
+		uint prefix_sum = subgroupExclusiveAdd(uint(is_radix_key));
+		if (is_radix_key) {
+			dest_gid += prefix_sum;
+		}
+		uint sum = subgroupAdd(uint(is_radix_key));
+		if (gl_NumSubgroups > 1 && subgroupElect()) {
+			sg_prefix_sums[srk * gl_NumSubgroups + gl_SubgroupID] = sum;
+		}
+	}
+	if (gl_NumSubgroups > 1) {
+		barrier();
+	}
+
+	// Parallel-reduce the prefix sums of each subgroup, then of each group of
+	// subgroups, etc., to get the number of preceding keys with the same radix
+	// key as `key` within the work group
+	for (uint s = 1, o = 0, n = gl_NumSubgroups; gl_NumSubgroups > s;) {
+		uint ss = s * gl_SubgroupSize;
+		uint oo = o + n * R_WAY;
+		uint nn = (gl_NumSubgroups - 1) / ss + 1;
+		if (gl_LocalInvocationID.x < n) {
+			for (uint srk = 0; srk < R_WAY; srk++) {
+				uint idx = o + srk * n + gl_LocalInvocationID.x;
+				uint sum = sg_prefix_sums[idx];
+				uint prefix_sum = subgroupExclusiveAdd(sum);
+				sg_prefix_sums[idx] = prefix_sum;
+
+				if (gl_NumSubgroups > ss) {
+					sum = subgroupAdd(sum);
+					if (subgroupElect()) {
+						sg_prefix_sums[oo + srk * nn + gl_SubgroupID] = sum;
+					}
+				}
+			}
+		}
+		barrier();
+
+		dest_gid += sg_prefix_sums[o + shifted_radix_key * n + gl_SubgroupID / s];
+
+		s = ss, o = oo, n = nn;
+	}
+
+	// Add the the global index of the first key with the same radix key as
+	// `key` of the work group to obtain `key`’s global destination index
+	dest_gid += wg_prefix_sums[shifted_radix_key * gl_NumWorkGroups.x + gl_WorkGroupID.x];
+
+	if (dest_gid > keys_out.length()) return;
+
+	// Copy `key` and if needed the corresponding value to the destination
+	// index of the output buffers
+	keys_out[dest_gid] = key;
+	if (!vals_is_keys) {
+		copy_val(dest_gid, uniforms.val_size);
+	}
+}

@@ -1,0 +1,83 @@
+#version 460
+
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+
+
+layout(constant_id = 0) const uint WORK_GROUP_SIZE = 1024;
+layout(constant_id = 1) const uint SUBGROUP_SIZE = 32;
+layout(constant_id = 2) const uint R_WAY = 4;
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Keys {
+	uint keys[];
+};
+
+layout(set = 0, binding = 1) writeonly buffer WgSums {
+	uint wg_sums[];
+};
+
+// Geometric series: `w/s + w/s/s + w/s/s/s + …`, which approx. evaluates
+// to `w/(s-1)` (tested for a wide range for values for `w` and `s`).
+const uint SG_REDUCE_SIZE = R_WAY * (WORK_GROUP_SIZE / (SUBGROUP_SIZE - 1));
+shared uint sg_sums[SG_REDUCE_SIZE];
+
+layout(push_constant) uniform PushConstants {
+	uint radix_offset;
+} uniforms;
+
+void main() {
+	bool in_bounds = gl_GlobalInvocationID.x < keys.length();
+
+	uint key = in_bounds ? keys[gl_GlobalInvocationID.x] : 0xFFFFFFFFu;
+
+	uint radix_shift = uniforms.radix_offset * findLSB(R_WAY);
+	uint radix_mask = (R_WAY - 1) << radix_shift;
+
+	uint radix_key = key & radix_mask;
+
+//	TODO: Local sort (stable!) for improved performance in `_global` below? Measure!
+
+	// Count the number of keys with the same radix key as `key` within the
+	// subgroup using a sum over the same-or-not boolean (1 or 0)
+	uint shifted_radix_key = radix_key >> radix_shift;
+	for (uint srk = 0; srk < R_WAY; srk++) {
+		bool is_radix_key = shifted_radix_key == srk;
+		uint sum = subgroupAdd(uint(is_radix_key));
+
+		if (gl_NumSubgroups <= 1) {
+			if (gl_LocalInvocationID.x == 0) {
+				wg_sums[srk * gl_NumWorkGroups.x + gl_WorkGroupID.x] = sum;
+			}
+		} else if (subgroupElect()) {
+			sg_sums[srk * gl_NumSubgroups + gl_SubgroupID] = sum;
+		}
+	}
+
+	// Parallel-reduce the sums of each subgroup, then of each group of
+	// subgroups, etc., to get the sum of keys with the same radix key
+	// as `key` within the work group
+	for (uint s = 1, o = 0, n = gl_NumSubgroups; gl_NumSubgroups > s;) {
+		barrier();
+
+		s *= gl_SubgroupSize;
+		uint next_o = o + n * R_WAY;
+		uint next_n = (n - 1) / s + 1;
+		if (gl_LocalInvocationID.x < n) {
+			for (uint srk = 0; srk < R_WAY; srk++) {
+				uint sum = sg_sums[srk * n + gl_LocalInvocationID.x];
+				sum = subgroupAdd(sum);
+
+				if (gl_NumSubgroups <= s) {
+					if (gl_LocalInvocationID.x == 0) {
+						wg_sums[srk * gl_NumWorkGroups.x + gl_WorkGroupID.x] = sum;
+					}
+				} else if (subgroupElect()) {
+					sg_sums[next_o + srk * next_n + gl_SubgroupID] = sum;
+				}
+			}
+		}
+		o = next_o, n = next_n;
+	}
+}

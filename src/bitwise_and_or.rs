@@ -217,7 +217,7 @@ impl ParallelReduceExt for BitwiseAndOr {
 }
 
 #[test]
-fn big() {
+fn large() {
 	mod vk {
 		pub(super) use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
 		pub(super) use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;

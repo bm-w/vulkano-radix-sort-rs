@@ -1,0 +1,14 @@
+#version 460
+
+#include "radix_sort_shared.comp"
+
+layout(push_constant) uniform PushConstants {
+	uint val_size;
+} uniforms;
+
+void main() {
+	keys_out[gl_GlobalInvocationID.x] = keys_in[gl_GlobalInvocationID.x];
+	if (uniforms.val_size > 0) {
+		copy_val(gl_GlobalInvocationID.x, uniforms.val_size);
+	}
+}

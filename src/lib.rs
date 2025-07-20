@@ -1,6 +1,9 @@
 pub mod bitwise_and_or;
 pub mod prefix_sums;
+pub mod radix_sort;
 mod util;
+
+pub use radix_sort::{RadixSort, Error};
 
 #[cfg(test)]
 mod vk {
@@ -19,7 +22,9 @@ fn immediate_submit<R>(
 			AutoCommandBufferBuilder, CommandBufferUsage,
 			allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo},
 		};
-		pub(super) use vulkano::device::{Device, DeviceCreateInfo, QueueCreateInfo, QueueFlags};
+		pub(super) use vulkano::device::{
+			Device, DeviceCreateInfo, DeviceFeatures, QueueCreateInfo, QueueFlags,
+		};
 		pub(super) use vulkano::instance::{Instance, InstanceCreateFlags, InstanceCreateInfo};
 		pub(super) use vulkano::library::VulkanLibrary as Library;
 	}
@@ -55,6 +60,10 @@ fn immediate_submit<R>(
 				queue_family_index,
 				..Default::default()
 			}],
+			enabled_features: vk::DeviceFeatures {
+				storage_buffer8_bit_access: true,
+				..Default::default()
+			},
 			..Default::default()
 		},
 	)

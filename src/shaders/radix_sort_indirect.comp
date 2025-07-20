@@ -1,0 +1,62 @@
+#version 460
+
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+
+
+layout(constant_id = 0) const uint WORK_GROUP_SIZE = 1024;
+layout(constant_id = 2) const uint R_WAY = 4;
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer BitwiseAndResult {
+	uint bitwise_and_result[];
+};
+
+layout(set = 0, binding = 1) readonly buffer BitwiseOrResult {
+	uint bitwise_or_result[];
+};
+
+layout(set = 0, binding = 2) writeonly buffer IndirectDispatches {
+	uvec3 indirect_dispatches[]; // `VkDispatchIndirectCommand`
+};
+
+layout(push_constant) uniform Uniforms {
+	uint keys_len;
+} uniforms;
+
+shared uint dispatches[6];
+
+void main() {
+	uint bitwise_and_or_result = bitwise_and_result[0] ^ bitwise_or_result[0];
+
+	uint rw = findLSB(R_WAY);
+	uint n = 31 / rw + 1;
+	if (gl_LocalInvocationID.x >= n) return;
+
+	uint m = (indirect_dispatches.length() - 1) / n / 2;
+
+	if (gl_LocalInvocationID.x == 0) {
+		uint w = dispatches[0] = ((uniforms.keys_len - 1) / WORK_GROUP_SIZE + 1);
+		w = dispatches[1] = ((R_WAY * w - 1) / WORK_GROUP_SIZE + 1);
+		for (uint j = 2; j < m; j++) {
+			w = dispatches[j] = (w - 1) / WORK_GROUP_SIZE + 1;
+		}
+	}
+	barrier();
+
+	uint r = ((1 << rw) - 1) << (gl_LocalInvocationID.x * rw);
+	uint z = uint((r & bitwise_and_or_result) != 0);
+	uvec2 zz = subgroupExclusiveAdd(z) % 2 == 0 ? uvec2(z, 0) : uvec2(0, z);
+
+	uint o = gl_LocalInvocationID.x * m * 2;
+	for (uint j = 0; j < m; j++) {
+		indirect_dispatches[o + j] = zz.x * uvec3(dispatches[j], 1, 1);
+		indirect_dispatches[o + m + j] = zz.y * uvec3(dispatches[j], 1, 1);
+	}
+
+	z = subgroupAdd(z) % 2;
+	if (gl_LocalInvocationID.x == 0) {
+		indirect_dispatches[indirect_dispatches.length() - 1] = z * uvec3(uniforms.keys_len, 1, 1);
+	}
+}

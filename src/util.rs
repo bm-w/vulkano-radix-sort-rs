@@ -36,6 +36,17 @@ pub(crate) trait ParallelReduceExt {
 		}
 		min_buffer_len + 1
 	}
+
+	/// Returns the number of parallel-reduction levels for the given number
+	/// of values.
+	fn parallel_reduce_depth(&self, mut vals_len: u64) -> u64 {
+		let mut depth = 0;
+		while vals_len > 1 {
+			depth += 1;
+			vals_len = self.partial_parallel_reduce_buffer_len(vals_len);
+		}
+		depth
+	}
 }
 
 fn parallel_reduce_buffer_split(len: u64, stride: u64, align: u64) -> u64 {

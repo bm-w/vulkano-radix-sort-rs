@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 mod vk {
 	pub(super) use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
-	pub(super) use vulkano::command_buffer::AutoCommandBufferBuilder;
+	pub(super) use vulkano::command_buffer::{AutoCommandBufferBuilder, DispatchIndirectCommand};
 	pub(super) use vulkano::descriptor_set::{
 		DescriptorSet, WriteDescriptorSet, allocator::DescriptorSetAllocator,
 	};
@@ -23,11 +23,11 @@ use crate::util::ParallelReduceExt;
 /// A set of compute kernels that performs an in-place prefix sums operations
 /// on an array of 32-bit unsigned integers.
 pub struct PrefixSums {
-	descriptor_set_allocator: Arc<dyn vk::DescriptorSetAllocator>,
-	buffer_memory_allocator: Arc<vk::StandardMemoryAllocator>,
+	pub(crate) descriptor_set_allocator: Arc<dyn vk::DescriptorSetAllocator>,
+	pub(crate) buffer_memory_allocator: Arc<vk::StandardMemoryAllocator>,
 	local_pipeline: Arc<vk::ComputePipeline>,
 	global_pipeline: Arc<vk::ComputePipeline>,
-	work_group_size: u32,
+	pub(crate) work_group_size: u32,
 }
 
 /// The error type that can be returned by [`PrefixSums`]’s methods
@@ -180,22 +180,30 @@ impl PrefixSums {
 			.unwrap()
 		};
 
-		self.record_inner(command_buffer_builder, vals_buffer, aux_buffer)
+		let mut dispatches = Vec::new();
+		let vals_len = vals_buffer.len();
+		self.create_direct_dispatches(&mut dispatches, vals_buffer, aux_buffer)?;
+		debug_assert_eq!(
+			dispatches.len() as u64,
+			2 * self.parallel_reduce_depth(vals_len) - 1
+		);
+		self.record_dispatches(
+			command_buffer_builder,
+			dispatches
+				.into_iter()
+				.map(|(n, ds)| (Dispatch::Direct { num_work_groups: n }, ds)),
+		);
+
+		Ok(())
 	}
 
-	fn record_inner<L>(
+	pub(crate) fn create_direct_dispatches(
 		&self,
-		command_buffer_builder: &mut vk::AutoCommandBufferBuilder<L>,
+		dispatches: &mut Vec<(u32, Arc<vk::DescriptorSet>)>,
 		vals_buffer: vk::Subbuffer<[u32]>,
 		aux_buffer: vk::Subbuffer<[u32]>,
 	) -> Result<(), Error> {
 		let num_work_groups = self.partial_parallel_reduce_buffer_len(vals_buffer.len());
-
-		// Local
-
-		command_buffer_builder
-			.bind_pipeline_compute(self.local_pipeline.clone())
-			.unwrap();
 
 		let local_descriptor_set = vk::DescriptorSet::new(
 			self.descriptor_set_allocator.clone(),
@@ -207,40 +215,21 @@ impl PrefixSums {
 			[],
 		)
 		.map_err(vk::Validated::unwrap)?;
-
-		command_buffer_builder
-			.bind_descriptor_sets(
-				vk::PipelineBindPoint::Compute,
-				self.local_pipeline.layout().clone(),
-				0,
-				local_descriptor_set,
-			)
-			.unwrap();
-
-		unsafe { command_buffer_builder.dispatch([num_work_groups as u32, 1, 1]) }.unwrap();
+		dispatches.push((num_work_groups as u32, local_descriptor_set));
 
 		if num_work_groups == 1 {
 			return Ok(());
 		}
 
-		// Parallel-reduce
-
 		let split = self.parallel_reduce_buffer_split(num_work_groups);
-		let (parallel_reduce_vals_buffer, parallel_reduce_aux_buffer) =
-			aux_buffer.clone().split_at(split);
+		let (parallel_reduce_vals_buffer, parallel_reduce_aux_buffer) = aux_buffer.split_at(split);
 		let parallel_reduce_vals_buffer = parallel_reduce_vals_buffer.slice(..num_work_groups);
 
-		self.record_inner(
-			command_buffer_builder,
+		self.create_direct_dispatches(
+			dispatches,
 			parallel_reduce_vals_buffer.clone(),
 			parallel_reduce_aux_buffer,
 		)?;
-
-		// Global
-
-		command_buffer_builder
-			.bind_pipeline_compute(self.global_pipeline.clone())
-			.unwrap();
 
 		let global_descriptor_set = vk::DescriptorSet::new(
 			self.descriptor_set_allocator.clone(),
@@ -252,19 +241,47 @@ impl PrefixSums {
 			[],
 		)
 		.map_err(vk::Validated::unwrap)?;
-
-		command_buffer_builder
-			.bind_descriptor_sets(
-				vk::PipelineBindPoint::Compute,
-				self.local_pipeline.layout().clone(),
-				0,
-				global_descriptor_set,
-			)
-			.unwrap();
-
-		unsafe { command_buffer_builder.dispatch([num_work_groups as u32, 1, 1]) }.unwrap();
+		dispatches.push((num_work_groups as u32, global_descriptor_set));
 
 		Ok(())
+	}
+
+	pub(crate) fn record_dispatches<L>(
+		&self,
+		command_buffer_builder: &mut vk::AutoCommandBufferBuilder<L>,
+		mut dispatches: impl ExactSizeIterator<Item = (Dispatch, Arc<vk::DescriptorSet>)>,
+	) {
+		let locals = dispatches.len() / 2 + 1;
+
+		command_buffer_builder
+			.bind_pipeline_compute(self.local_pipeline.clone())
+			.unwrap();
+		for (dispatch, descriptor_set) in dispatches.by_ref().take(locals) {
+			command_buffer_builder
+				.bind_descriptor_sets(
+					vk::PipelineBindPoint::Compute,
+					self.local_pipeline.layout().clone(),
+					0,
+					descriptor_set,
+				)
+				.unwrap();
+			dispatch.record(command_buffer_builder);
+		}
+
+		command_buffer_builder
+			.bind_pipeline_compute(self.global_pipeline.clone())
+			.unwrap();
+		for (dispatch, descriptor_set) in dispatches {
+			command_buffer_builder
+				.bind_descriptor_sets(
+					vk::PipelineBindPoint::Compute,
+					self.global_pipeline.layout().clone(),
+					0,
+					descriptor_set,
+				)
+				.unwrap();
+			dispatch.record(command_buffer_builder);
+		}
 	}
 }
 
@@ -282,6 +299,25 @@ impl ParallelReduceExt for PrefixSums {
 			.properties()
 			.min_storage_buffer_offset_alignment
 			.as_devicesize()
+	}
+}
+
+#[derive(Debug)]
+pub(crate) enum Dispatch {
+	Direct { num_work_groups: u32 },
+	Indirect(vk::Subbuffer<[vk::DispatchIndirectCommand]>),
+}
+
+impl Dispatch {
+	fn record<L>(self, command_buffer_builder: &mut vk::AutoCommandBufferBuilder<L>) {
+		match self {
+			Self::Direct { num_work_groups } => {
+				unsafe { command_buffer_builder.dispatch([num_work_groups, 1, 1]) }.unwrap();
+			}
+			Self::Indirect(indirect_command) => {
+				unsafe { command_buffer_builder.dispatch_indirect(indirect_command) }.unwrap();
+			}
+		}
 	}
 }
 

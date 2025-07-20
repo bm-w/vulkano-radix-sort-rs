@@ -1,0 +1,27 @@
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+
+
+layout(set = 0, binding = 0) readonly buffer KeysIn {
+	uint keys_in[];
+};
+
+layout(set = 0, binding = 1) readonly buffer ValsIn {
+	uint8_t vals_in[];
+};
+
+layout(set = 0, binding = 2) restrict writeonly buffer KeysOut {
+	uint keys_out[];
+};
+
+layout(set = 0, binding = 3) restrict writeonly buffer ValsOut {
+	uint8_t vals_out[];
+};
+
+void copy_val(uint dest_gid, uint val_size) {
+    uint from_idx = gl_GlobalInvocationID.x * val_size;
+    uint to_idx = dest_gid * val_size;
+    for (uint o = 0; o < val_size; o++) {
+        vals_out[to_idx + o] = vals_in[from_idx + o];
+    }
+}
