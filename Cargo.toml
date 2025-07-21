@@ -1,7 +1,14 @@
 [package]
-name = "vulkan-radix-sort"
-version = "0.0.0"
+name = "vulkano-radix-sort"
+version = "0.0.1"
 edition = "2024"
+description = "Vulkano-based radix sort implementation on the GPU"
+license = "BSD-2-Clause-Patent"
+authors = ["Bastiaan Marinus van de Weerd <bastiaan+git@bm-w.eu>"]
+repository = "https://github.com/bm-w/vulkano-radix-sort-rs"
+readme = "README.md"
+keywords = ["vulkan", "vulkano", "gpu", "sorting", "compute", "radix-sort"]
+categories = ["algorithms", "graphics"]
 
 [dependencies]
 foldhash = "0.1.5"
